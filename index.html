@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Component Chameleon</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --primary-color: #4f46e5;
+      --primary-hover: #4338ca;
+      --background-color: #f8fafc;
+      --card-background: #ffffff;
+      --text-color: #1e293b;
+      --subtle-text: #64748b;
+      --border-color: #e2e8f0;
+      --error-color: #ef4444;
+      --status-success-bg: #dcfce7;
+      --status-success-text: #166534;
+      --status-warning-bg: #fef3c7;
+      --status-warning-text: #92400e;
+      --status-error-bg: #fee2e2;
+      --status-error-text: #991b1b;
+      --status-neutral-bg: #e2e8f0;
+      --status-neutral-text: #475569;
+    }
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      font-family: 'Inter', sans-serif;
+      background-color: var(--background-color);
+      color: var(--text-color);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    #root {
+      padding: 2rem 1rem;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    .spinner {
+      border: 3px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top-color: #fff;
+      width: 1em;
+      height: 1em;
+      animation: spin 1s linear infinite;
+    }
+    .spinner-small {
+      border: 2px solid var(--subtle-text);
+      border-radius: 50%;
+      border-top-color: var(--primary-color);
+      width: 1.25em;
+      height: 1.25em;
+      animation: spin 1s linear infinite;
+    }
+    .skeleton {
+      background-color: #e2e8f0; /* Fallback */
+      background: linear-gradient(100deg, #e5e7eb 8%, #f3f4f6 18%, #e5e7eb 33%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s linear infinite;
+      border-radius: 6px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    @keyframes shimmer {
+      to {
+        background-position-x: -200%;
+      }
+    }
+  </style>
+<script type="importmap">
+{
+  "imports": {
+    "react/": "https://aistudiocdn.com/react@^19.1.1/",
+    "react": "https://aistudiocdn.com/react@^19.1.1",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.1.1/",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.20.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-latest/package/xlsx.mjs"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="index.js"></script>
+</body>
+</html>
