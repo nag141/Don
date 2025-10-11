@@ -1,6 +1,7 @@
-import React, { useState, useMemo } from 'react';
+
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import ReactDOM from 'react-dom/client';
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, Chat } from "@google/genai";
 import * as XLSX from 'xlsx';
 
 // --- TYPE DEFINITIONS ---
@@ -40,6 +41,31 @@ interface BulkFindResult {
     alternatives: AlternativeComponent[];
     status: BulkResultStatus;
     error?: string;
+}
+
+interface CircuitComponent {
+    id: string;
+    type: 'R' | 'C' | 'LED' | 'V+' | 'GND';
+    value: string;
+    label: string;
+    position: { x: number; y: number };
+}
+
+interface CircuitConnection {
+    from: string; // "componentId.pinName"
+    to: string;   // "componentId.pinName"
+}
+
+interface CircuitData {
+    components: CircuitComponent[];
+    connections: CircuitConnection[];
+}
+
+
+interface ChatMessage {
+    role: 'user' | 'model';
+    text: string;
+    circuit?: CircuitData;
 }
 
 type ErrorType = 'API_ERROR' | 'NOT_FOUND' | 'PARSING_ERROR' | 'FILE_ERROR' | 'UNKNOWN_ERROR';
@@ -1313,6 +1339,292 @@ const BomHealthFinder = () => {
     );
 };
 
+const extractCircuitJson = (text: string): { circuit: CircuitData | null, remainingText: string } => {
+    const circuitRegex = /```circuit-json\s*([\s\S]*?)\s*```/;
+    const match = text.match(circuitRegex);
+
+    if (match && match[1]) {
+        try {
+            const circuitJson = JSON.parse(match[1]);
+            // Basic validation
+            if (circuitJson.components && circuitJson.connections) {
+                const remainingText = text.replace(circuitRegex, '').trim();
+                return { circuit: circuitJson, remainingText };
+            }
+        } catch (e) {
+            console.error("Failed to parse circuit JSON:", e);
+        }
+    }
+
+    return { circuit: null, remainingText: text };
+};
+
+const SchematicRenderer = ({ circuitData }: { circuitData: CircuitData }) => {
+    // Component dimensions and pin definitions
+    const componentMetrics: {[key: string]: any} = {
+        'R': { width: 60, height: 20, pins: { p1: { x: 0, y: 10 }, p2: { x: 60, y: 10 } } },
+        'C': { width: 30, height: 40, pins: { p1: { x: 15, y: 0 }, p2: { x: 15, y: 40 } } },
+        'LED': { width: 40, height: 40, pins: { anode: { x: 20, y: 0 }, cathode: { x: 20, y: 40 } } },
+        'V+': { width: 30, height: 30, pins: { p: { x: 15, y: 15 } } },
+        'GND': { width: 40, height: 20, pins: { p: { x: 20, y: 0 } } },
+    };
+
+    const getComponentSvg = (component: CircuitComponent) => {
+        switch (component.type) {
+            case 'R':
+                return <rect x="0" y="0" width="60" height="20" stroke="black" fill="white" strokeWidth="2" />;
+            case 'C':
+                return <>
+                    <line x1="15" y1="18" x2="15" y2="0" stroke="black" strokeWidth="2" />
+                    <line x1="15" y1="22" x2="15" y2="40" stroke="black" strokeWidth="2" />
+                    <line x1="5" y1="18" x2="25" y2="18" stroke="black" strokeWidth="2" />
+                    <line x1="5" y1="22" x2="25" y2="22" stroke="black" strokeWidth="2" />
+                </>;
+            case 'LED':
+                return <>
+                    <line x1="20" y1="0" x2="20" y2="15" stroke="black" strokeWidth="2" />
+                    <polygon points="5,15 35,15 20,30" stroke="black" fill="white" strokeWidth="2" />
+                    <line x1="5" y1="15" x2="35" y2="15" stroke="black" strokeWidth="2" />
+                    <line x1="20" y1="30" x2="20" y2="40" stroke="black" strokeWidth="2" />
+                    {/* Arrows indicating light */}
+                    <line x1="30" y1="5" x2="35" y2="0" stroke="black" strokeWidth="1.5" />
+                    <line x1="35" y1="10" x2="40" y2="5" stroke="black" strokeWidth="1.5" />
+                </>;
+            case 'V+':
+                return <>
+                    <circle cx="15" cy="15" r="14" stroke="black" fill="white" strokeWidth="2" />
+                    <line x1="15" y1="5" x2="15" y2="25" stroke="black" strokeWidth="2" />
+                    <line x1="5" y1="15" x2="25" y2="15" stroke="black" strokeWidth="2" />
+                </>;
+            case 'GND':
+                return <>
+                    <line x1="20" y1="0" x2="20" y2="5" stroke="black" strokeWidth="2" />
+                    <line x1="5" y1="5" x2="35" y2="5" stroke="black" strokeWidth="2" />
+                    <line x1="10" y1="10" x2="30" y2="10" stroke="black" strokeWidth="2" />
+                    <line x1="15" y1="15" x2="25" y2="15" stroke="black" strokeWidth="2" />
+                </>;
+            default:
+                return null;
+        }
+    };
+    
+    // Calculate SVG viewbox to fit all components
+    const PADDING = 40;
+    if (!circuitData || !circuitData.components || circuitData.components.length === 0) {
+        return null;
+    }
+
+    const allX = circuitData.components.map(c => c.position.x);
+    const allY = circuitData.components.map(c => c.position.y);
+    const minX = Math.min(...allX) - PADDING;
+    const minY = Math.min(...allY) - PADDING;
+    const maxX = Math.max(...allX.map((x, i) => x + (componentMetrics[circuitData.components[i].type]?.width || 0))) + PADDING;
+    const maxY = Math.max(...allY.map((y, i) => y + (componentMetrics[circuitData.components[i].type]?.height || 0))) + PADDING;
+    const width = maxX - minX;
+    const height = maxY - minY;
+
+    const getPinAbsPos = (componentId: string, pinName: string) => {
+        const component = circuitData.components.find(c => c.id === componentId);
+        if (!component) return null;
+        const metrics = componentMetrics[component.type];
+        if (!metrics || !metrics.pins[pinName]) return null;
+        return {
+            x: component.position.x + metrics.pins[pinName].x,
+            y: component.position.y + metrics.pins[pinName].y,
+        };
+    };
+
+    return (
+        <div style={styles.schematicContainer}>
+            <svg viewBox={`${minX} ${minY} ${width} ${height}`} style={{ width: '100%', height: 'auto' }}>
+                {/* Wires */}
+                {circuitData.connections.map((conn, i) => {
+                    const [fromId, fromPin] = conn.from.split('.');
+                    const [toId, toPin] = conn.to.split('.');
+                    const fromPos = getPinAbsPos(fromId, fromPin);
+                    const toPos = getPinAbsPos(toId, toPin);
+                    if (!fromPos || !toPos) return null;
+                    return <line key={i} x1={fromPos.x} y1={fromPos.y} x2={toPos.x} y2={toPos.y} stroke="#334155" strokeWidth="2" />;
+                })}
+                {/* Components */}
+                {circuitData.components.map(comp => (
+                    <g key={comp.id} transform={`translate(${comp.position.x}, ${comp.position.y})`}>
+                        {getComponentSvg(comp)}
+                        <text x={componentMetrics[comp.type].width / 2} y="-8" textAnchor="middle" fontSize="12" fill="#64748b">{comp.label}</text>
+                        <text x={componentMetrics[comp.type].width / 2} y={ (componentMetrics[comp.type]?.height || 0) + 15} textAnchor="middle" fontSize="12" fill="#1e293b" fontWeight="500">{comp.value}</text>
+                    </g>
+                ))}
+            </svg>
+        </div>
+    );
+};
+
+const DesignAssistant = () => {
+    const chat = useRef<Chat | null>(null);
+    const [messages, setMessages] = useState<ChatMessage[]>([]);
+    const [userInput, setUserInput] = useState('');
+    const [isLoading, setIsLoading] = useState(false);
+    const messageListRef = useRef<HTMLDivElement>(null);
+
+    const suggestionPrompts = [
+        "Design a simple LED driver circuit",
+        "Suggest a 5V regulator for a USB-powered device",
+        "Help me choose a microcontroller for a simple IoT project",
+        "What kind of capacitor should I use for power supply decoupling?"
+    ];
+
+    useEffect(() => {
+        const initChat = () => {
+            chat.current = ai.chats.create({
+                model: 'gemini-2.5-flash',
+                config: {
+                    systemInstruction: "You are an expert electronics design assistant named Component Chameleon. You help engineers and hobbyists choose components, understand circuits, and solve design problems. When suggesting components, provide specific part numbers where possible. Use markdown for formatting lists and bold text. When asked to design a circuit, you MUST provide the schematic in a specific JSON format inside a markdown code block labeled 'circuit-json'. The JSON must have 'components' and 'connections' keys. Components must have id, type (R, C, LED, V+, GND), value, label, and position. Connections must specify 'from' and 'to' points as 'componentId.pinName'. Arrange components logically for a clean layout (e.g., power top, ground bottom, signal left-to-right).",
+                },
+            });
+            setMessages([{
+                role: 'model',
+                text: "Hello! I'm your Design Assistant. How can I help you with your electronics project today? You can ask me to suggest components, explain concepts, or help you with a design idea."
+            }]);
+        };
+        initChat();
+    }, []);
+
+    useEffect(() => {
+        if (messageListRef.current) {
+            messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
+        }
+    }, [messages, isLoading]);
+
+    const handleSendMessage = async (messageText: string) => {
+        const text = messageText.trim();
+        if (!text || isLoading || !chat.current) return;
+
+        setUserInput('');
+        setIsLoading(true);
+        setMessages(prev => [...prev, { role: 'user', text }]);
+        
+        try {
+            const responseStream = await chat.current.sendMessageStream({ message: text });
+            
+            let modelResponse = '';
+            setMessages(prev => [...prev, { role: 'model', text: '' }]);
+
+            for await (const chunk of responseStream) {
+                modelResponse += chunk.text;
+                setMessages(prev => {
+                    const newMessages = [...prev];
+                    const lastMessage = newMessages[newMessages.length - 1];
+                    if(lastMessage.role === 'model') {
+                        lastMessage.text = modelResponse;
+                    }
+                    return newMessages;
+                });
+            }
+
+            // After stream is complete, process for circuit JSON
+            const { circuit, remainingText } = extractCircuitJson(modelResponse);
+            setMessages(prev => {
+                const newMessages = [...prev];
+                const lastMessage = newMessages[newMessages.length - 1];
+                if(lastMessage.role === 'model') {
+                    lastMessage.text = remainingText;
+                    lastMessage.circuit = circuit || undefined;
+                }
+                return newMessages;
+            });
+
+        } catch (error) {
+            console.error("Error sending message:", error);
+            const errorMessage = error instanceof Error ? error.message : "An unknown error occurred.";
+            setMessages(prev => {
+                const newMessages = [...prev];
+                const lastMessage = newMessages[newMessages.length - 1];
+                if (lastMessage && lastMessage.role === 'model') {
+                    lastMessage.text = `Sorry, I encountered an error: ${errorMessage}`;
+                } else {
+                    newMessages.push({ role: 'model', text: `Sorry, I encountered an error: ${errorMessage}` });
+                }
+                return newMessages;
+            });
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleFormSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        handleSendMessage(userInput);
+    };
+
+    const MarkdownRenderer = ({ text }: { text: string }) => {
+        const parts = text.split(/(\*\*.*?\*\*)/g).map((part, index) => {
+            if (part.startsWith('**') && part.endsWith('**')) {
+                return <strong key={index}>{part.slice(2, -2)}</strong>;
+            }
+            return part;
+        });
+
+        // FIX: Add explicit generic type to flatMap to fix type inference issue.
+        const lines = parts.flatMap<React.ReactNode>(p => typeof p === 'string' ? p.split('\n') : [p]);
+        
+        return <div>{lines.map((line, index) => {
+             if (typeof line === 'string' && line.trim().startsWith('* ')) {
+                return <li key={index}>{line.trim().substring(2)}</li>;
+            }
+            // FIX: The type of `line` is now correctly inferred as ReactNode, resolving the error.
+            return <React.Fragment key={index}>{line}{index < lines.length -1 && <br />}</React.Fragment>
+        })}</div>;
+    };
+
+
+    return (
+        <div style={styles.chatContainer}>
+            <div style={styles.messageList} ref={messageListRef}>
+                {messages.map((msg, index) => (
+                    <div key={index} style={msg.role === 'user' ? styles.userBubble : styles.modelBubble}>
+                       <MarkdownRenderer text={msg.text} />
+                       {msg.circuit && <SchematicRenderer circuitData={msg.circuit} />}
+                    </div>
+                ))}
+                {isLoading && messages[messages.length-1]?.role === 'user' && (
+                    <div style={styles.modelBubble}>
+                        <div style={styles.typingIndicator}>
+                            <span></span><span></span><span></span>
+                        </div>
+                    </div>
+                )}
+            </div>
+            {messages.length <= 1 && !isLoading && (
+                <div style={styles.promptSuggestionsContainer}>
+                    {suggestionPrompts.map(prompt => (
+                         <button
+                            key={prompt}
+                            onClick={() => handleSendMessage(prompt)}
+                            style={styles.recentSearchButton}
+                         >
+                             {prompt}
+                         </button>
+                    ))}
+                </div>
+            )}
+            <form onSubmit={handleFormSubmit} style={styles.chatInputForm}>
+                <input
+                    type="text"
+                    value={userInput}
+                    onChange={(e) => setUserInput(e.target.value)}
+                    placeholder="Ask a design question..."
+                    style={styles.chatInput}
+                    aria-label="Your message"
+                    disabled={isLoading}
+                />
+                <button type="submit" style={styles.chatSendButton} disabled={isLoading}>
+                    {isLoading ? <div className="spinner" /> : 'Send'}
+                </button>
+            </form>
+        </div>
+    );
+};
+
 
 const App = () => {
     const [activeTab, setActiveTab] = useState('finder');
@@ -1335,10 +1647,18 @@ const App = () => {
                 >
                     BOM Health Finder
                 </button>
+                <button
+                    onClick={() => setActiveTab('assistant')}
+                    style={activeTab === 'assistant' ? styles.tabButtonActive : styles.tabButton}
+                    aria-current={activeTab === 'assistant'}
+                >
+                    Design Assistant
+                </button>
             </nav>
             <div style={styles.tabContent}>
                 {activeTab === 'finder' && <ComponentFinder />}
                 {activeTab === 'bom' && <BomHealthFinder />}
+                {activeTab === 'assistant' && <DesignAssistant />}
             </div>
         </main>
     );
@@ -1696,6 +2016,91 @@ const styles: { [key: string]: React.CSSProperties } = {
     padding: '0.25rem',
     textDecoration: 'underline',
     transition: 'color 0.2s',
+  },
+  // --- Chat styles ---
+  chatContainer: {
+    display: 'flex',
+    flexDirection: 'column',
+    height: 'calc(100vh - 250px)',
+    maxHeight: '700px',
+    backgroundColor: 'var(--card-background)',
+    borderRadius: '12px',
+    border: '1px solid var(--border-color)',
+    boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)',
+    overflow: 'hidden',
+  },
+  messageList: {
+    flexGrow: 1,
+    padding: '1.5rem',
+    overflowY: 'auto',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '1rem',
+  },
+  userBubble: {
+    alignSelf: 'flex-end',
+    backgroundColor: 'var(--primary-color)',
+    color: 'white',
+    padding: '0.75rem 1rem',
+    borderRadius: '1.25rem 1.25rem 0.25rem 1.25rem',
+    maxWidth: '80%',
+    lineHeight: 1.5,
+  },
+  modelBubble: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#f1f5f9',
+    color: 'var(--text-color)',
+    padding: '0.75rem 1rem',
+    borderRadius: '1.25rem 1.25rem 1.25rem 0.25rem',
+    maxWidth: '80%',
+    lineHeight: 1.5,
+  },
+  chatInputForm: {
+    display: 'flex',
+    padding: '1rem',
+    borderTop: '1px solid var(--border-color)',
+    gap: '0.5rem',
+  },
+  chatInput: {
+    flexGrow: 1,
+    padding: '0.75rem 1rem',
+    fontSize: '1rem',
+    borderRadius: '9999px',
+    border: '1px solid var(--border-color)',
+    backgroundColor: 'var(--background-color)',
+  },
+  chatSendButton: {
+    padding: '0.75rem 1.5rem',
+    fontSize: '1rem',
+    fontWeight: 500,
+    color: '#fff',
+    backgroundColor: 'var(--primary-color)',
+    border: 'none',
+    borderRadius: '9999px',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  typingIndicator: {
+    display: 'flex',
+    gap: '0.25rem',
+    alignItems: 'center',
+    padding: '0.5rem 0',
+  },
+  promptSuggestionsContainer: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '0.5rem',
+    padding: '0 1.5rem 1rem 1.5rem',
+    borderTop: '1px solid var(--border-color)',
+  },
+  schematicContainer: {
+    marginTop: '1rem',
+    padding: '1rem',
+    backgroundColor: 'var(--background-color)',
+    borderRadius: '8px',
+    border: '1px solid var(--border-color)',
   },
 };
 
